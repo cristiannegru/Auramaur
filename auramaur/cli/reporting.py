@@ -340,20 +340,23 @@ def ibkr_calibration(arm: str, width: float):
                     conf_table.add_column(col, justify="right")
                 for band in confidence_bands(resolved):
                     conf_table.add_row(
-                        band.label, str(band.n), f"{band.realized:.1%}",
+                        band.label, str(band.n), f"{band.hit_rate:.1%}",
                         f"{band.lo:.1%}", f"{band.hi:.1%}",
                         f"{band.calibration_gap:+.1%}",
                         "[green]yes[/]" if band.beats_coin else "[dim]no[/]")
                 console.print(conf_table)
 
                 curve = Table(title="calibration curve", expand=False)
-                for col in ("bucket", "n", "mean forecast", "realized",
+                # "up rate", not "hit rate": the calibration reference is how
+                # often the market rose, which is only accuracy by coincidence
+                # (#418 — the conflation credited noise arms with skill).
+                for col in ("bucket", "n", "mean forecast", "up rate",
                             "95% low", "gap"):
                     curve.add_column(col, justify="right")
                 for band in probability_bands(resolved, width=width):
                     curve.add_row(
                         band.label, str(band.n), f"{band.mean_forecast:.3f}",
-                        f"{band.realized:.1%}", f"{band.lo:.1%}",
+                        f"{band.up_rate:.1%}", f"{band.up_lo:.1%}",
                         f"{band.calibration_gap:+.1%}")
                 console.print(curve)
 

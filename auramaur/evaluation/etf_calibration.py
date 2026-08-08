@@ -81,24 +81,38 @@ class Forecast:
 
 @dataclass(frozen=True)
 class Band:
-    """A group of resolved forecasts and how often they were right."""
+    """A group of resolved forecasts, scored on two DIFFERENT questions.
+
+    ``hit_rate`` answers "was the arm's direction right" — a hit is
+    ``(probability > 0.5) == outcome``. ``up_rate`` answers "how often did the
+    market go up" — the calibration reference that ``mean_forecast`` is
+    compared against. Conflating them was #418: in a market that rose 66% of
+    the time, the up rate was displayed as "hit rate" and scored against a
+    coin, crediting pure-noise arms with directional skill and inverting a
+    kill/keep read. Each quantity carries its own Wilson interval; there is
+    deliberately no field named ``realized`` so every consumer must choose.
+    """
     label: str
     n: int
-    hits: int
+    hits: int              # directional hits: (probability > 0.5) == outcome
+    up_hits: int           # UP outcomes — the calibration numerator
     mean_forecast: float
-    realized: float
-    lo: float
+    hit_rate: float        # directional accuracy
+    up_rate: float         # realized up frequency (calibration reference)
+    lo: float              # Wilson bounds on hit_rate — feeds beats_coin
     hi: float
+    up_lo: float           # Wilson bounds on up_rate — calibration curve CI
+    up_hi: float
 
     @property
     def beats_coin(self) -> bool:
-        """True only when the LOWER bound clears a coin flip."""
+        """True only when the DIRECTIONAL lower bound clears a coin flip."""
         return self.lo > COIN
 
     @property
     def calibration_gap(self) -> float:
-        """Realized minus forecast. Positive = the arm is underconfident."""
-        return self.realized - self.mean_forecast
+        """Up rate minus forecast. Positive = the arm is underconfident."""
+        return self.up_rate - self.mean_forecast
 
 
 @dataclass(frozen=True)
@@ -139,15 +153,25 @@ def brier_score(forecasts) -> float | None:
                for f in resolved) / len(resolved)
 
 
+def _directional_hit(f) -> bool:
+    # A forecast at exactly 0.5 predicts DOWN under this predicate — the
+    # conservative reading (it certainly did not predict up), and the one
+    # #418's ground-truth measurement used.
+    return (f.probability > COIN) == bool(f.actual_outcome)
+
+
 def _band(label: str, group, z: float) -> Band | None:
     if not group:
         return None
     n = len(group)
-    hits = sum(int(f.actual_outcome) for f in group)
+    hits = sum(_directional_hit(f) for f in group)
+    up_hits = sum(int(f.actual_outcome) for f in group)
     lo, hi = wilson_interval(hits, n, z)
-    return Band(label=label, n=n, hits=hits,
+    up_lo, up_hi = wilson_interval(up_hits, n, z)
+    return Band(label=label, n=n, hits=hits, up_hits=up_hits,
                 mean_forecast=sum(f.probability for f in group) / n,
-                realized=hits / n, lo=lo, hi=hi)
+                hit_rate=hits / n, up_rate=up_hits / n,
+                lo=lo, hi=hi, up_lo=up_lo, up_hi=up_hi)
 
 
 def probability_bands(forecasts, *, width: float = 0.02,
@@ -176,7 +200,9 @@ def probability_bands(forecasts, *, width: float = 0.02,
 
 
 def confidence_bands(forecasts, z: float = DEFAULT_Z) -> list[Band]:
-    """Does a higher stated confidence actually predict a higher hit rate?
+    """Does a higher stated confidence actually predict a higher DIRECTIONAL
+    hit rate? (Band.hit_rate — not the market's up rate, which stated
+    confidence cannot influence.)
 
     If the bands do not separate, ``etf_arm_min_confidence`` is not carrying
     information for these arms and should not be the binding gate — which
@@ -231,6 +257,12 @@ def threshold_sweep(forecasts, thresholds, *, min_confidence: str = "LOW",
     for threshold in sorted(thresholds):
         group = [f for f in eligible if f.probability >= threshold]
         n = len(group)
+        # Deliberately the UP-outcome count, not _directional_hit: the gate is
+        # long-only (rules reject probability < min_probability; every selected
+        # forecast becomes an UP entry), so the up rate among selected IS the
+        # win rate of the trades this threshold would have taken. That is the
+        # decision quantity here — unlike _band's tables, where the same
+        # expression masqueraded as accuracy (#418).
         hits = sum(int(f.actual_outcome) for f in group)
         realized = hits / n if n else 0.0
         lo = wilson_interval(hits, n, z)[0] if n else 0.0

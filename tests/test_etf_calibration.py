@@ -46,7 +46,7 @@ def test_wilson_stays_inside_zero_one_where_the_normal_interval_does_not():
 def test_a_thin_sample_does_not_beat_a_coin():
     """12/20 is a 60% hit rate and is NOT evidence of an edge."""
     band = confidence_bands(_run(0.55, "LOW", 12, 8))[0]
-    assert band.n == 20 and band.realized == 0.6
+    assert band.n == 20 and band.hit_rate == 0.6
     assert not band.beats_coin
     assert band.lo < COIN < band.hi
     # The same rate on a large sample is evidence.
@@ -75,6 +75,29 @@ def test_calibration_gap_exposes_an_underconfident_arm():
     assert band.beats_coin
 
 
+def test_a_rising_market_does_not_credit_a_noise_arm_with_skill():
+    """The #418 regression: base rate is not accuracy.
+
+    In a market that rose 66% of the time, an arm forecasting pure noise
+    around 0.5 used to display a 66% "hit rate" and "beats coin: yes" —
+    inverting a kill/keep decision. Directional accuracy must stay pinned
+    to (probability > 0.5) == outcome, and the up rate must stay available
+    separately as the calibration reference.
+    """
+    # 100 forecasts alternating just above/just below coin, in a market
+    # that rises 2 times out of 3 regardless of what the arm says.
+    spec = []
+    for i in range(99):
+        probability = 0.51 if i % 2 == 0 else 0.49
+        outcome = 1 if i % 3 != 0 else 0
+        spec.append((probability, "LOW", outcome))
+    band = confidence_bands(_forecasts(spec))[0]
+    assert band.up_rate > 0.6          # the market really did rise often
+    assert band.up_lo > 0.5            # ...significantly so
+    assert abs(band.hit_rate - 0.5) < 0.1   # but the arm has no skill
+    assert not band.beats_coin         # and must not be credited with any
+
+
 def test_probability_bands_resolve_the_narrow_range_the_arms_produce():
     """Decile bins would collapse 0.43-0.56 into two buckets."""
     forecasts = _forecasts(
@@ -83,7 +106,7 @@ def test_probability_bands_resolve_the_narrow_range_the_arms_produce():
     bands = probability_bands(forecasts, width=0.02)
     assert len(bands) >= 3
     assert sum(b.n for b in bands) == 6
-    assert bands[0].realized == 0.0 and bands[-1].realized == 1.0
+    assert bands[0].up_rate == 0.0 and bands[-1].up_rate == 1.0
     # Unresolved forecasts are excluded, never counted as misses.
     assert probability_bands(_forecasts([(0.5, "LOW", None)])) == []
 
@@ -94,7 +117,7 @@ def test_confidence_bands_order_by_rank_and_can_fail_to_separate():
     assert [b.label for b in bands] == ["LOW", "MEDIUM_LOW"]
     # Identical hit rates: stated confidence carries no information here, so
     # etf_arm_min_confidence should not be the binding gate.
-    assert bands[0].realized == bands[1].realized == 0.5
+    assert bands[0].hit_rate == bands[1].hit_rate == 0.5
     assert not any(b.beats_coin for b in bands)
 
 
