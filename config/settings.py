@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -1313,6 +1314,31 @@ class ResolutionLensConfig(BaseModel):
     kalshi_min_liquidity: float = 50.0
 
 
+class LiveAuthorityGrant(BaseModel):
+    """Bounded, reviewable authority for one directional strategy surface."""
+
+    venues: list[str] = Field(min_length=1)
+    categories: list[str] = Field(min_length=1)
+    max_stake_usd: float = Field(gt=0)
+    max_open_notional_usd: float = Field(gt=0)
+    granted_at: datetime
+    review_by: date
+    evidence_basis: str = Field(min_length=3)
+    stop_loss_usd: float = Field(gt=0)
+    review_after_settlements: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _review_follows_grant(self):
+        if self.review_by <= self.granted_at.date():
+            raise ValueError("live-authority review_by must follow granted_at")
+        self.venues = sorted({venue.strip().lower() for venue in self.venues if venue.strip()})
+        self.categories = sorted({category.strip().lower() for category in self.categories
+                                  if category.strip()})
+        if not self.venues or not self.categories:
+            raise ValueError("live-authority venues and categories cannot be empty")
+        return self
+
+
 class GraduationConfig(BaseModel):
     """Graduation ladder (risk/graduation.py) — capital earned per
     (strategy × category) cell from the pnl_ledger record.
@@ -1374,6 +1400,36 @@ class GraduationConfig(BaseModel):
     # only — it never upsizes, never touches proven/probation/exempt cells, and
     # never affects exits. 0 disables.
     max_unproven_positions: int = 100
+
+    # Directional strategies never belong in exempt_strategies. A grant is
+    # matched on strategy + venue + category and expires/fails closed when its
+    # pre-registered review or loss boundary is reached.
+    live_authority: dict[str, list[LiveAuthorityGrant]] = Field(
+        default_factory=dict)
+
+    @model_validator(mode="after")
+    def _directional_authority_is_never_exempt(self):
+        structural = {"arbitrage", "market_maker", "order_monitor"}
+        directional = sorted(set(self.exempt_strategies) - structural)
+        if directional:
+            raise ValueError(
+                "directional graduation exemptions require live_authority grants: "
+                + ", ".join(directional))
+        for strategy, grants in self.live_authority.items():
+            seen: set[tuple[str, str]] = set()
+            for grant in grants:
+                overlap = seen & {
+                    (venue, category)
+                    for venue in grant.venues for category in grant.categories
+                }
+                if overlap:
+                    raise ValueError(
+                        f"overlapping live_authority grants for {strategy}: "
+                        f"{sorted(overlap)}")
+                seen.update(
+                    (venue, category)
+                    for venue in grant.venues for category in grant.categories)
+        return self
 
 
 class InformationGraduationConfig(BaseModel):
