@@ -1683,7 +1683,7 @@ class AuramaurBot(
 
         await self._init_components()
         if self.settings.is_live:
-            issues = self._components.risk.graduation.authority_crosscheck()
+            issues = self._components.risk_manager.graduation.authority_crosscheck()
             if issues:
                 for issue in issues:
                     log.critical("startup.live_authority_mismatch", issue=issue)
