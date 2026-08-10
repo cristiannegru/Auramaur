@@ -28,6 +28,9 @@ execution:
   exit_min_bid_price: 0.05   # never cross into a bid below this (junk-bid guard)
   spread_capture_min_bps: 50
   stop_loss_pct: 30.0
+  # Fresh entries are not judged by mark-driven stops for this many minutes
+  # (wide-spread entry marks read as instant losses; 2026-08-09 churn incident).
+  exit_entry_grace_minutes: 30.0
   profit_target_pct: 50.0
   # Lifecycle bands remain behavior-compatible, but are explicit and calibratable.
   profit_target_early_pct: 75.0
@@ -62,6 +65,9 @@ risk:
   # 2026-06-15 before this clamp existed).
   max_stake_abs_ceiling: 25.0
   daily_loss_limit: 200.0
+  # Re-entry cooldown after an exit in the same book/market (anti-churn,
+  # 2026-08-06..09 exit-then-rebuy cycles). 0 disables.
+  reentry_cooldown_hours: 24.0
   max_open_positions: 500
   min_edge_pct: 2.5
   min_liquidity: 1000.0

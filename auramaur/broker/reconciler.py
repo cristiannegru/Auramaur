@@ -121,6 +121,15 @@ class PositionReconciler:
                 # untracked (found 2026-07-21 via the venue-drift panel — a
                 # near-resolved $10 winner among them).
                 recovered_id = await self._ingest_market_from_gamma(item)
+                if recovered_id:
+                    # The stub queued by _find_market_id moments ago must not
+                    # be flushed after a SUCCESSFUL recovery: the flush would
+                    # insert the duplicate stub+real row pair this recovery
+                    # exists to prevent (markets has no UNIQUE on
+                    # condition_id, so INSERT OR IGNORE cannot save us).
+                    self._pending_stubs = [
+                        r for r in self._pending_stubs
+                        if r[1] != item.condition_id]
                 market_id = recovered_id or market_id
             if not market_id:
                 market_id = stub_id
@@ -403,9 +412,15 @@ class PositionReconciler:
         self, condition_id: str, question: str, slug: str,
     ) -> str | None:
         """Match a CLOB condition_id to our numeric market_id via DB."""
-        # Try matching by condition_id
+        # Try matching by condition_id. A condition can be matched by BOTH a
+        # legacy stub row (id == condition_id[:16]) and the recovered real
+        # row; preferring the real one is what makes recovery CONVERGE —
+        # while the stub won this lookup, every reconcile pass re-ran the
+        # Gamma fetch + destructive re-ingest for the same position, forever
+        # (~950 re-ingests per recent log window before this ordering).
         row = await self._db.fetchone(
-            "SELECT id FROM markets WHERE condition_id = ?",
+            """SELECT id FROM markets WHERE condition_id = ?
+                ORDER BY (id = substr(condition_id, 1, 16)) ASC LIMIT 1""",
             (condition_id,),
         )
         if row:

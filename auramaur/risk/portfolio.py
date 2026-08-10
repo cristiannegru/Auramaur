@@ -458,6 +458,31 @@ class PortfolioTracker:
             if (exchange is not None and key[0] != exchange)
             or key in active_sample_keys
         }
+        # Entry grace for mark-driven stops. A fresh entry on a wide-spread
+        # book carries the spread as an instant paper loss (2026-08-09: a
+        # 0.14 entry marked at the 0.095 bid read -32% one minute in and the
+        # stop dumped it), so STOP_LOSS/TRAILING_STOP don't judge a position
+        # younger than the grace window. Keyed by cost_basis.updated_at: a
+        # scale-in refreshes the window (conservative), and a lookup failure
+        # simply disables the grace — the stops must never depend on
+        # telemetry health to FIRE, only to wait.
+        grace_minutes = getattr(settings.execution, "exit_entry_grace_minutes", 30)
+        if (not isinstance(grace_minutes, (int, float))
+                or isinstance(grace_minutes, bool) or grace_minutes < 0):
+            grace_minutes = 30
+        fresh_entry_keys: set[tuple[str, str, int]] = set()
+        if grace_minutes:
+            try:
+                fresh_rows = await self.db.fetchall(
+                    """SELECT market_id, token, is_paper FROM cost_basis
+                        WHERE size > 0
+                          AND datetime(updated_at) >= datetime('now', ?)""",
+                    (f"-{int(grace_minutes)} minutes",))
+                fresh_entry_keys = {
+                    (r["market_id"], str(r["token"]).upper(), int(r["is_paper"]))
+                    for r in fresh_rows}
+            except Exception as exc:  # noqa: BLE001 — grace only, never exits
+                log.debug("exit.entry_grace_lookup_failed", error=str(exc))
         self._exit_terminal_samples = {
             key for key in self._exit_terminal_samples
             if (exchange is not None and key[0] != exchange)
@@ -582,8 +607,16 @@ class PortfolioTracker:
                 estimated_fees = economics.estimated_fees
 
 
-            # 1. Stop-loss — hard floor
-            if pnl_pct <= -settings.execution.stop_loss_pct:
+            in_entry_grace = (
+                pos.market_id,
+                str(getattr(pos.token, "value", pos.token)).upper(),
+                self._position_mode(pos, mode_flag),
+            ) in fresh_entry_keys
+
+            # 1. Stop-loss — hard floor (deferred during the entry grace:
+            # the "loss" a minute after entry is usually the spread, not
+            # the market — see the grace block above the loop).
+            if pnl_pct <= -settings.execution.stop_loss_pct and not in_entry_grace:
                 self._record_terminal_once(
                     decisions, pos, mode_flag, ExitReason.STOP_LOSS.value,
                     pnl_pct, net_pnl_pct, peak_pnl_pct, None, estimated_fees)
@@ -591,8 +624,8 @@ class PortfolioTracker:
                 continue
 
             # 2. Trailing stop — config-driven so calibration can change policy
-            # without changing runtime code.
-            if trailing_stop_triggered(
+            # without changing runtime code. Same grace as the stop.
+            if not in_entry_grace and trailing_stop_triggered(
                 peak_pct=peak_pnl_pct,
                 current_pct=pnl_pct,
                 activation_pct=settings.execution.trailing_stop_activation_pct,

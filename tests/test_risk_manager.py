@@ -148,7 +148,8 @@ async def test_evaluate_passing_case(mock_kill):
     assert decision.position_size > 0
     # 15 pre + mispricing_named + blocked_category + max_stake
     # + long_settlement_bucket (2026-08-02)
-    assert len(decision.checks) == 19
+    # + reentry_cooldown (2026-08-10 churn incident)
+    assert len(decision.checks) == 20
     assert all(c.passed for c in decision.checks)
 
 

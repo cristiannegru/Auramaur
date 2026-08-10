@@ -30,6 +30,7 @@ from auramaur.risk.checks import (
     check_blocked_category,
     check_category_allowlist,
     check_dispute_risk,
+    check_reentry_cooldown,
     check_mispricing_named,
     check_second_opinion_divergence,
     check_time_to_resolution,
@@ -370,6 +371,28 @@ class RiskManager:
             min_divergence=rc.mispricing_min_divergence,
             applies=signal.strategy_source in ("llm",),
         ))
+
+        # Anti-churn: an exit's verdict on a market outlives the exit. Scoped
+        # to the entry's own book, and fails OPEN on lookup trouble — see
+        # check_reentry_cooldown. exit_lifecycle.updated_at also covers exits
+        # still being retried, which is the strongest reason not to re-enter.
+        hours_since_exit: float | None = None
+        if rc.reentry_cooldown_hours > 0:
+            try:
+                row = await self.portfolio.db.fetchone(
+                    """SELECT (julianday('now') - julianday(MAX(updated_at)))
+                              * 24.0 AS hours
+                         FROM exit_lifecycle
+                        WHERE market_id = ? AND is_paper = ?""",
+                    (signal.market_id, 0 if not is_paper_entry else 1),
+                )
+                if row is not None and row["hours"] is not None:
+                    hours_since_exit = float(row["hours"])
+            except Exception as e:
+                log.debug("risk.reentry_lookup_failed",
+                          market_id=signal.market_id, error=str(e))
+        pre_checks.append(await check_reentry_cooldown(
+            hours_since_exit, rc.reentry_cooldown_hours))
 
         pre_passed = all(c.passed for c in pre_checks)
 

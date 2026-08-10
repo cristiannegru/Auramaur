@@ -181,6 +181,12 @@ class ExecutionConfig(BaseModel):
     depth_aware_routing: bool = True
     book_capacity_fraction: float = 0.5
     stop_loss_pct: float = 30.0
+    # Mark-driven stops (STOP_LOSS / TRAILING_STOP) don't judge a position
+    # younger than this: a fresh entry on a wide-spread book carries the
+    # spread as an instant paper loss, and on cheap tokens a few cents reads
+    # as -30%+ (2026-08-09: entered 0.14, bid-marked 0.095, stopped out one
+    # minute later). ge=0: zero disables the grace.
+    exit_entry_grace_minutes: float = Field(default=30.0, ge=0)
     profit_target_pct: float = 50.0
     profit_target_early_pct: float = Field(default=75.0, gt=0)
     profit_target_late_pct: float = Field(default=25.0, gt=0)
@@ -224,6 +230,11 @@ class RiskConfig(BaseModel):
     # (a $40 entry at ~3.3% of equity slipped through before, 2026-06-15).
     max_stake_abs_ceiling: float = 25.0
     daily_loss_limit: float = 200.0
+    # Anti-churn: block re-entering a market this book exited (or is still
+    # trying to exit) within this window. 2026-08-06..09: exit-then-rebuy
+    # cycles paid the spread as a per-cycle tax — sells at 0.09 rebought at
+    # 0.12 within hours. ge=0: zero disables the cooldown.
+    reentry_cooldown_hours: float = Field(default=24.0, ge=0)
     max_open_positions: int = 200
     min_edge_pct: float = 5.0
     min_liquidity: float = 1000.0

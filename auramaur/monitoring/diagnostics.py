@@ -183,10 +183,9 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
 
     records = _read_tail_records(settings.logging.file, max_bytes)
 
-    # Log freshness — is the process even writing? Also gives us the time span
-    # the scanned tail covers, so error counts below are interpretable as a rate.
+    # Log freshness — is the process even writing? (The error verdict below
+    # uses its own fixed health window, not the tail's span.)
     stamps = [t for t in (_parse_ts(r.get("timestamp", "")) for r in records) if t]
-    span_min = (max(stamps) - min(stamps)).total_seconds() / 60.0 if len(stamps) >= 2 else None
     if not stamps:
         checks.append(_chk("log freshness", "warn", "no recent log lines"))
     else:

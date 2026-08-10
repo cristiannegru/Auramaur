@@ -606,3 +606,38 @@ async def check_dispute_risk(dispute_risk: str, applies: bool = True) -> CheckRe
                 else "market resolution is under an active UMA dispute"),
         value=dispute_risk,
     )
+
+
+async def check_reentry_cooldown(
+    hours_since_exit: float | None,
+    cooldown_hours: float,
+    applies: bool = True,
+) -> CheckResult:
+    """Block re-entry into a market this book recently exited (or is exiting).
+
+    2026-08-06..09: the revived exit path sold positions that term_structure
+    still liked, so it rebought them within hours — sometimes above its own
+    sell price — and the next exit realized the spread again. Exit-then-rebuy
+    cycles turned the spread into a per-cycle tax. The exit's verdict on a
+    market outlives the exit itself for a cooldown window; a strategy that
+    still wants the market can want it again tomorrow.
+
+    ``hours_since_exit`` is derived from exit_lifecycle.updated_at, so an
+    exit still being RETRIED also holds the window open — entering a market
+    the bot is actively trying to leave is the same cycle with extra steps.
+    ``None`` means no recorded exit activity (or the lookup failed): the
+    check passes — it is an anti-churn control, not a safety gate, and must
+    fail open rather than freeze entries on telemetry trouble.
+    """
+    if not applies or cooldown_hours <= 0 or hours_since_exit is None:
+        return CheckResult(name="reentry_cooldown", passed=True, reason="",
+                           value=hours_since_exit)
+    passed = hours_since_exit >= cooldown_hours
+    return CheckResult(
+        name="reentry_cooldown",
+        passed=passed,
+        reason=("" if passed else
+                f"exited this market {hours_since_exit:.1f}h ago "
+                f"(cooldown {cooldown_hours:g}h)"),
+        value=hours_since_exit,
+    )
