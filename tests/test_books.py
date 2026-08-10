@@ -36,6 +36,7 @@ def test_gather_books_attribution_and_modes():
             "current_price, is_paper) VALUES "
             "('p1', 'polymarket', 'BUY', 10, 0.50, 0.55, 0), "
             "('p2', 'polymarket', 'BUY', 10, 0.86, 0.86, 1), "
+            "('KX-UNATTR', 'kalshi', 'BUY', 4, 0.50, 0.55, 0), "
             "('XBTUSDC', 'kraken', 'BUY', 0.001, 70000, 70000, 0)")
         await db.execute(
             "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES "
@@ -49,6 +50,7 @@ def test_gather_books_attribution_and_modes():
         assert books["bias_harvest"]["open_paper_n"] == 1
         assert books["bias_harvest"]["paper_pnl"] == 2.0
         assert books["kraken_directional"]["open_n"] == 1  # via exchange, not signals
+        assert books["venue_unattributed_kalshi"]["open_n"] == 1
         assert books["ibkr_fx"]["paper_n"] == 2
         assert books["ibkr_fx"]["paper_pnl"] == 2
         assert books["ibkr_fx"]["win_pct"] == 50

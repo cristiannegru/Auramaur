@@ -48,7 +48,7 @@ so no verdict flips today.
 """
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from statistics import NormalDist
 
 import math
@@ -58,6 +58,14 @@ from dataclasses import dataclass
 import structlog
 
 log = structlog.get_logger()
+
+
+def _utc_timestamp(value: object) -> datetime:
+    """Parse SQLite/ISO timestamps onto one aware UTC timeline."""
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -367,10 +375,8 @@ class GraduationLadder:
             for row in items:
                 net_pnl = float(row["net_pnl"] or 0)
                 if cfg.require_cash_benchmark:
-                    opened = datetime.fromisoformat(
-                        str(row["observed_at"]).replace("Z", "+00:00"))
-                    resolved = datetime.fromisoformat(
-                        str(row["resolved_at"]).replace("Z", "+00:00"))
+                    opened = _utc_timestamp(row["observed_at"])
+                    resolved = _utc_timestamp(row["resolved_at"])
                     hold_years = max(
                         0.0, (resolved - opened).total_seconds()
                     ) / (365.25 * 86400)
@@ -387,7 +393,7 @@ class GraduationLadder:
                 mean = sum(values)/len(values)
                 variance = sum((x-mean)**2 for x in values)/(len(values)-1)
                 return mean-z*math.sqrt(variance/len(values))
-            dates = [datetime.fromisoformat(str(r["observed_at"]).replace("Z", "+00:00")) for r in items]
+            dates = [_utc_timestamp(r["observed_at"]) for r in items]
             return {"n": len(items), "pnl": sum(pnl), "lcb": lcb(pnl),
                     "brier_lcb": lcb(brier),
                     "days": (max(dates)-min(dates)).days if len(dates)>1 else 0,

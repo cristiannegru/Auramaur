@@ -300,9 +300,10 @@ async def assemble_components(
     source_names.append("Markets")
     sources.append(PolymarketContextSource())
     source_names.append("PolyCtx")
-    from auramaur.data_sources.metaculus import MetaculusSource
-    sources.append(MetaculusSource())
-    source_names.append("Metaculus")
+    # Metaculus retired its unauthenticated /api2 feed. Do not register
+    # the legacy adapter as a production source: the current /api/posts API
+    # requires credentials and otherwise returns 403. Platform-consensus keeps
+    # its supplementary best-effort adapter until authenticated support lands.
     from auramaur.data_sources.manifold import ManifoldSource
     sources.append(ManifoldSource())
     source_names.append("Manifold")
@@ -362,6 +363,14 @@ async def assemble_components(
         db, min_resolved=ig.min_resolved, min_paired=ig.min_paired,
         min_success_rate=ig.min_success_rate,
         probation_multiplier=ig.probation_multiplier,
+    )
+    # Persist the deliberate retirement so current-state diagnostics do not
+    # mistake a pre-restart circuit-open row for an active provider failure.
+    await db.execute(
+        """INSERT INTO source_fetches
+           (run_id, source, status, observed_at, error)
+           VALUES (lower(hex(randomblob(16))), 'metaculus', 'disabled',
+                   datetime('now'), 'authenticated API required')"""
     )
     for source, category, horizon, event_type in (
         ("nws", "weather", "0-6h", "severe_weather_transition"),

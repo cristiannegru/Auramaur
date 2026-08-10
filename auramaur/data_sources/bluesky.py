@@ -83,12 +83,21 @@ class BlueskySource:
             url, headers = _PUBLIC_SEARCH, {}
         async with session.get(url, params=params, headers=headers,
                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status in (401, 403) and self._authed and not retried:
+            detail = ""
+            if resp.status != 200:
+                detail = (await resp.text())[:160]
+            expired_token = (
+                resp.status == 400
+                and "expiredtoken" in detail.casefold()
+            )
+            if ((resp.status in (401, 403) or expired_token)
+                    and self._authed and not retried):
                 # Expired/invalidated token: recreate the session once.
                 self._jwt = ""
                 return await self._search(
                     session, params, retried=True, relaxed=relaxed)
-            if resp.status == 400 and not relaxed and "since" in params:
+            if (resp.status == 400 and not expired_token
+                    and not relaxed and "since" in params):
                 # Some AppView deployments reject the optional freshness
                 # cursor. Keep search available by retrying once with only the
                 # core, universally supported query parameters.
@@ -96,7 +105,6 @@ class BlueskySource:
                     session, {k: v for k, v in params.items() if k != "since"},
                     retried=retried, relaxed=True)
             if resp.status != 200:
-                detail = (await resp.text())[:160]
                 raise BlueskyFetchError(f"search returned {resp.status}: {detail}")
             return await resp.json()
 

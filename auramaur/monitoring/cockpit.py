@@ -127,7 +127,9 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
     # side when a market holds both YES and NO, duplicating positions and
     # double-counting P&L (found via the web UI's duplicate-key warning).
     rows = await db.fetchall(
-        """SELECT p.*, m.question, m.end_date, cb.avg_cost AS cb_avg_cost FROM portfolio p
+        """SELECT p.*, m.question, m.end_date,
+                  m.outcome_yes_price, m.outcome_no_price,
+                  cb.avg_cost AS cb_avg_cost, cb.total_cost AS cb_total_cost FROM portfolio p
            LEFT JOIN markets m ON p.market_id = m.id
            LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
                                   AND cb.is_paper = p.is_paper
@@ -148,8 +150,14 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
             "side": r["side"], "size": r["size"], "avg_price": r["avg_price"],
             "current_price": r["current_price"] or r["avg_price"],
             "updated_at": r["updated_at"],
-            "initial_value": (r["avg_price"] or 0) * (r["size"] or 0),
+            "initial_value": (r["cb_total_cost"] if r["cb_total_cost"] is not None else (r["avg_price"] or 0) * (r["size"] or 0)),
             "current_value": (r["current_price"] or r["avg_price"] or 0) * (r["size"] or 0),
+            "portfolio_mark_price": (
+                ((r["outcome_no_price"] if r["token"] == "NO" else r["outcome_yes_price"])
+                 or r["current_price"] or r["avg_price"] or 0)
+                if (r["exchange"] or "polymarket") == "kalshi"
+                else (r["current_price"] or r["avg_price"] or 0)
+            ),
             "to_win": r["size"] or 0,
             "pnl": (
                 ((r["current_price"] or r["avg_price"]) - (r["cb_avg_cost"] or r["avg_price"]))
@@ -159,6 +167,20 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
         for r in rows
     ]
     position_value = sum((p["current_price"] or 0) * (p["size"] or 0) for p in positions)
+    venue_summaries: dict[str, dict[str, float | int]] = {}
+    for position in positions:
+        venue = position["exchange"] or "polymarket"
+        summary = venue_summaries.setdefault(
+            venue, {"count": 0, "value": 0.0, "mark_value": 0.0,
+                    "cost": 0.0, "pnl": 0.0}
+        )
+        summary["count"] += 1
+        summary["value"] += float(position["current_value"] or 0)
+        summary["mark_value"] += float(
+            (position["portfolio_mark_price"] or 0) * (position["size"] or 0)
+        )
+        summary["cost"] += float(position["initial_value"] or 0)
+        summary["pnl"] += float(position["pnl"] or 0)
 
     # Recent signals (edge feed)
     sig_rows = await db.fetchall(
@@ -244,6 +266,7 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
         "positions": positions,
         "position_count": len(positions),
         "position_value": position_value,
+        "venue_summaries": venue_summaries,
         "signals": signals,
         "trade_count": trade_count,
         "total_pnl": total_pnl,
@@ -353,9 +376,31 @@ def _venues_panel(s: dict) -> Panel:
     venues = Table.grid(padding=(0, 1))
     venues.add_column(style="magenta")
     venues.add_column()
-    venues.add_row("polymarket", f"{s['position_count']} pos, ${s['position_value']:.0f}")
-    for name, val in s["venues"].items():
-        venues.add_row(name, val)
+    summaries = s.get("venue_summaries", {})
+    rendered: set[str] = set()
+    for name, summary in sorted(summaries.items()):
+        if name == "kalshi":
+            detail = (
+                f"{int(summary['count'])} pos, "
+                f"${float(summary['mark_value']):.2f} portfolio mark, "
+                f"${float(summary['value']):.2f} executable, "
+                f"${float(summary['cost']):.2f} fee-cost, "
+                f"${float(summary['pnl']):+.2f} executable PnL"
+            )
+        else:
+            detail = (
+                f"{int(summary['count'])} pos, ${float(summary['value']):.2f} value, "
+                f"${float(summary['cost']):.2f} cost, "
+                f"${float(summary['pnl']):+.2f} PnL"
+            )
+        balance = s.get("venues", {}).get(name)
+        if balance not in (None, "-"):
+            detail += f" | {balance} cash" if name == "kalshi" else f" | {balance}"
+        venues.add_row(name, detail)
+        rendered.add(name)
+    for name, val in s.get("venues", {}).items():
+        if name not in rendered:
+            venues.add_row(name, val)
     return Panel(venues, title="venues")
 
 

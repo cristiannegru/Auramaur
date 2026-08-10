@@ -93,8 +93,16 @@ MIRROR_SQL = """INSERT INTO cost_basis (market_id, token, token_id, size, avg_co
    VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
    ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
        token = excluded.token, token_id = excluded.token_id,
-       size = excluded.size, avg_cost = excluded.avg_cost,
-       total_cost = excluded.total_cost, updated_at = excluded.updated_at"""
+       size = excluded.size,
+       avg_cost = CASE
+           WHEN cost_basis.size > 0 AND cost_basis.avg_cost > 0
+            AND cost_basis.token_id = excluded.token_id
+           THEN cost_basis.avg_cost ELSE excluded.avg_cost END,
+       total_cost = excluded.size * CASE
+           WHEN cost_basis.size > 0 AND cost_basis.avg_cost > 0
+            AND cost_basis.token_id = excluded.token_id
+           THEN cost_basis.avg_cost ELSE excluded.avg_cost END,
+       updated_at = excluded.updated_at"""
 
 
 async def _run_mirror_cycle(db, syncer, reconciler, reconciled):
@@ -278,6 +286,35 @@ async def test_both_sides_holding_keeps_two_rows_with_per_asset_basis(
         await db.close()
 
 
+@pytest.mark.asyncio
+async def test_live_mirror_preserves_active_fill_ledger_basis(
+        tmp_path, monkeypatch):
+    """Venue lifetime avgPrice must not overwrite a fresh bot entry basis."""
+    vp = _vp(WINNER["asset"], WINNER["outcome"], 0, 7.0, 0.20, 0.13)
+    db, reconciler, syncer, _tracker = await _setup(
+        tmp_path, monkeypatch, [vp])
+    try:
+        await db.execute(
+            """INSERT INTO cost_basis
+               (market_id, token, token_id, size, avg_cost, total_cost, is_paper)
+               VALUES (?, 'YES', ?, 5, 0.14, 0.70, 0)""",
+            (MID, WINNER["asset"]),
+        )
+        reconciled = await reconciler.reconcile()
+        await _run_mirror_cycle(db, syncer, reconciler, reconciled)
+
+        row = await db.fetchone(
+            """SELECT size, avg_cost, total_cost FROM cost_basis
+                WHERE market_id = ? AND token = 'YES' AND is_paper = 0""",
+            (MID,),
+        )
+        assert row["size"] == pytest.approx(7.0)
+        assert row["avg_cost"] == pytest.approx(0.14)
+        assert row["total_cost"] == pytest.approx(0.98)
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # (d) Class B: settle under the stub id, migrate ids, sweep under the real
 #     id -> no second booking.
@@ -361,6 +398,53 @@ async def test_repair_migrates_ledger_and_sweep_does_not_rebook(
         assert cb["size"] == pytest.approx(0.0)
         ds = await db.fetchone("SELECT COUNT(*) AS n FROM daily_stats")
         assert ds["n"] == 0, "an already-booked leg must not touch daily_stats"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_discards_duplicate_stub_when_canonical_rows_exist(tmp_path):
+    """A fresh canonical mirror must not make the stub repair roll back."""
+    db = await _class_b_db(tmp_path)
+    try:
+        for market_id, size in ((STUB_ID, 10.0), (REAL_ID, 9.0)):
+            await db.execute(
+                """INSERT INTO cost_basis
+                   (market_id, token, token_id, size, avg_cost, total_cost, is_paper)
+                   VALUES (?, 'YES', 'tok-d', ?, 0.4, 4.0, 0)""",
+                (market_id, size),
+            )
+            await db.execute(
+                """INSERT INTO portfolio
+                   (market_id, exchange, side, size, avg_price, token, token_id, is_paper)
+                   VALUES (?, 'polymarket', 'YES', ?, 0.4, 'YES', 'tok-d', 0)""",
+                (market_id, size),
+            )
+            await db.execute(
+                """INSERT INTO exit_lifecycle
+                   (exchange, market_id, token, is_paper, state, reason)
+                   VALUES ('polymarket', ?, 'YES', 0, 'UNMARKABLE', 'no_market_data')""",
+                (market_id,),
+            )
+
+        reconciler = PositionReconciler(_exchange(), db)
+        repaired = await reconciler.repair_orphaned_ids([ReconciledPosition(
+            market_id=REAL_ID, condition_id=STUB_COND, token_id="tok-d",
+            outcome="Yes", question="Stub?", size=9.0,
+        )])
+
+        assert repaired == 1
+        for table in ("cost_basis", "portfolio", "exit_lifecycle"):
+            stub = await db.fetchone(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE market_id = ?",
+                (STUB_ID,),
+            )
+            canonical = await db.fetchone(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE market_id = ?",
+                (REAL_ID,),
+            )
+            assert stub["n"] == 0
+            assert canonical["n"] == (0 if table == "exit_lifecycle" else 1)
     finally:
         await db.close()
 

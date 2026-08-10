@@ -262,13 +262,13 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
             """SELECT sf.source, sf.status
                  FROM source_fetches sf
                  JOIN (
-                       SELECT source, MAX(observed_at) AS observed_at
+                       SELECT source, MAX(datetime(observed_at)) AS observed_at
                          FROM source_fetches
                         WHERE datetime(observed_at) >= datetime('now', ?)
                         GROUP BY source
                  ) latest
                    ON latest.source = sf.source
-                  AND latest.observed_at = sf.observed_at""",
+                  AND latest.observed_at = datetime(sf.observed_at)""",
             (f"-{health_window_seconds} seconds",),
         )
         bad_sources = sorted({

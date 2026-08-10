@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import re
 
@@ -21,12 +20,6 @@ from auramaur.nlp.prompts import (
 from config.settings import Settings
 
 log = structlog.get_logger()
-
-# The Claude CLI uses one account/session directory. Parallel subprocesses
-# were exiting rc=1 with empty stderr and multiplying each logical call into
-# three retries. Serialize the process lane; callers remain async while queued.
-_CLAUDE_CLI_SEMAPHORE = asyncio.Semaphore(1)
-
 
 class AnalysisResult(BaseModel):
     """Result of a Claude probability analysis."""
@@ -164,39 +157,31 @@ class ClaudeAnalyzer:
 
         for attempt in range(1, max_attempts + 1):
             try:
+                from auramaur.nlp.claude_cli import (
+                    ClaudeCLIUnavailable,
+                    run_claude_cli,
+                )
                 from auramaur.subprocess_security import analysis_subprocess_env
-                async with _CLAUDE_CLI_SEMAPHORE:
-                    proc = await asyncio.create_subprocess_exec(
-                        "claude", "-p", prompt,
-                        "--output-format", "text",
-                        "--model", self._model,
-                        "--effort", use_effort,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        env=analysis_subprocess_env(),
-                    )
-                    try:
-                        stdout, stderr = await asyncio.wait_for(
-                            proc.communicate(), timeout=180)
-                    except (TimeoutError, asyncio.TimeoutError):
-                        killed = proc.kill()
-                        if inspect.isawaitable(killed):  # test doubles
-                            await killed
-                        await proc.wait()
-                        raise
 
-                if proc.returncode != 0:
-                    err_msg = stderr.decode().strip()
-                    log.error("claude_cli.error", returncode=proc.returncode, stderr=err_msg, attempt=attempt)
-                    raise RuntimeError(f"Claude CLI failed (rc={proc.returncode}): {err_msg}")
-
+                result = await run_claude_cli(
+                    "-p", prompt,
+                    "--output-format", "text",
+                    "--model", self._model,
+                    "--effort", use_effort,
+                    timeout=180,
+                    env=analysis_subprocess_env(),
+                )
                 log.info(
                     "claude_cli.call",
                     daily_calls=call_budget.record_call(),
                     budget=budget,
                 )
-                return stdout.decode().strip()
+                return result.stdout
 
+            except ClaudeCLIUnavailable:
+                # A known quota/session outage will not improve within this
+                # logical call. Let the router use another provider now.
+                raise
             except (TimeoutError, asyncio.TimeoutError, RuntimeError) as e:
                 last_error = e
                 if attempt < max_attempts:

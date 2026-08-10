@@ -420,53 +420,40 @@ class EnsembleAnalyzer:
             from auramaur.nlp.errors import BudgetExhausted
             raise BudgetExhausted(f"Daily Claude call budget ({budget}) exhausted")
 
+        from auramaur.nlp.claude_cli import (
+            ClaudeCLIUnavailable,
+            run_claude_cli,
+        )
+        from auramaur.subprocess_security import analysis_subprocess_env
+
         max_attempts = 3
         backoff_seconds = [5, 10, 20]
         last_error: Exception | None = None
 
         for attempt in range(1, max_attempts + 1):
             try:
-                from auramaur.subprocess_security import analysis_subprocess_env
-                proc = await asyncio.create_subprocess_exec(
-                    "claude", "-p", prompt,
+                result = await run_claude_cli(
+                    "-p", prompt,
                     "--output-format", "text",
                     "--model", model,
                     "--effort", self._settings.nlp.effort_ensemble_secondary,
                     "--max-turns", "1",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                    timeout=300,
                     env=analysis_subprocess_env(),
                 )
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=300,  # 5 min per model
-                )
-
-                if proc.returncode != 0:
-                    err_msg = stderr.decode().strip()
-                    raise RuntimeError(f"Claude CLI ({model}) failed (rc={proc.returncode}): {err_msg}")
-
                 log.info(
                     "ensemble.model_call",
                     model=model,
                     daily_calls=call_budget.record_call(),
                 )
+                return _parse_claude_json(result.stdout)
 
-                raw_text = stdout.decode().strip()
-                return _parse_claude_json(raw_text)
-
+            except ClaudeCLIUnavailable:
+                raise
             except (TimeoutError, asyncio.TimeoutError, RuntimeError) as e:
                 last_error = e
                 if attempt < max_attempts:
-                    delay = backoff_seconds[attempt - 1]
-                    log.warning(
-                        "ensemble.model_retry",
-                        model=model,
-                        attempt=attempt,
-                        delay=delay,
-                        error=str(e),
-                    )
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(backoff_seconds[attempt - 1])
 
         raise last_error  # type: ignore[misc]
 

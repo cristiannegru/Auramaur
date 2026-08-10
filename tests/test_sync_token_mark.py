@@ -177,3 +177,24 @@ def test_markets_table_has_clob_token_columns():
             await db.close()
 
     asyncio.run(run())
+
+
+def test_polymarket_live_sync_excludes_explicit_kalshi_cost_basis():
+    """Venue-specific syncers must never race by claiming each other's rows."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            await _seed_market(db, "KXOTHER", yes_price=0.60)
+            await db.execute(
+                "UPDATE markets SET exchange='kalshi' WHERE id='KXOTHER'")
+            await _seed_holding(
+                db, "KXOTHER", "YES", "KXOTHER", size=12.0, avg_cost=0.40)
+            await db.commit()
+
+            positions = await _syncer(db)._sync_live()
+            assert positions == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())

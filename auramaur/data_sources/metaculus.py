@@ -75,7 +75,7 @@ class MetaculusSource:
             }
 
             data = None
-            for attempt, delay in enumerate([2, 5, 15]):
+            for attempt, delay in enumerate([2]):
                 await self._rate_limit()
                 async with session.get(f"{_API_BASE}/questions/", params=params) as resp:
                     if resp.status in (429, 403):

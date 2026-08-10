@@ -1075,25 +1075,22 @@ class StrategicAnalyzer:
                 "--exclude-dynamic-system-prompt-sections",
             ]
 
+        from auramaur.nlp.claude_cli import (
+            ClaudeCLIUnavailable,
+            run_claude_cli,
+        )
+
         max_attempts = 3
         backoff = [10, 20, 40]
         last_error: Exception | None = None
 
         for attempt in range(1, max_attempts + 1):
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                result = await run_claude_cli(
+                    *cmd[1:],
+                    timeout=480,
                     env=analysis_subprocess_env(),
                 )
-                # Longer timeout for deep reasoning (up to 8 min)
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=480)
-
-                if proc.returncode != 0:
-                    err = stderr.decode().strip()
-                    raise RuntimeError(f"Claude CLI ({use_model}) failed (rc={proc.returncode}): {err}")
-
                 from auramaur.nlp import call_budget
                 log.info(
                     "strategic.claude_call",
@@ -1102,8 +1099,10 @@ class StrategicAnalyzer:
                     cached_prefix=bool(system_prompt),
                     daily_calls=call_budget.record_call(),
                 )
-                return stdout.decode().strip()
+                return result.stdout
 
+            except ClaudeCLIUnavailable:
+                raise
             except (TimeoutError, asyncio.TimeoutError, RuntimeError) as e:
                 last_error = e
                 if attempt < max_attempts:

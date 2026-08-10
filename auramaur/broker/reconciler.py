@@ -503,21 +503,40 @@ class PositionReconciler:
             if not pos.market_id or pos.market_id == pos.condition_id[:16]:
                 continue  # Still unresolved
 
-            orphan_id = pos.condition_id[:16]
+            # Historical fallbacks used both truncated and full condition ids.
             # Check if cost_basis has the orphan ID — reconciler is live-only,
             # so confine the rename to is_paper=0 rows.  cost_basis is keyed
             # by (market_id, is_paper); without the filter we could rename a
             # paper row into a key that already exists for live and violate
             # the composite PK.
             row = await self._db.fetchone(
-                "SELECT market_id FROM cost_basis WHERE market_id = ? AND is_paper = 0",
-                (orphan_id,),
+                """SELECT market_id FROM cost_basis
+                    WHERE market_id IN (?, ?) AND is_paper = 0 LIMIT 1""",
+                (pos.condition_id[:16], pos.condition_id),
             )
             if row:
+                orphan_id = row["market_id"]
                 # All statements below are db-only (no network awaits), so the
                 # per-position rename batch lands atomically in one span.
                 async with self._db.transaction(
                         owner="reconciler.repair_orphaned_ids"):
+                    # A previous enrichment pass may already have mirrored the
+                    # wallet position under the canonical Gamma id. Renaming
+                    # the old stub into that row violates the composite PK and
+                    # rolls the repair back forever. The canonical row is the
+                    # fresh venue snapshot, so discard only the duplicate stub.
+                    for table in ("cost_basis", "portfolio", "exit_lifecycle"):
+                        await self._db.execute(
+                            f"""DELETE FROM {table}
+                                  WHERE market_id = ? AND is_paper = 0
+                                    AND EXISTS (
+                                        SELECT 1 FROM {table} canonical
+                                         WHERE canonical.market_id = ?
+                                           AND canonical.is_paper = 0
+                                           AND canonical.token = {table}.token
+                                    )""",
+                            (orphan_id, pos.market_id),
+                        )
                     await self._db.execute(
                         "UPDATE cost_basis SET market_id = ? WHERE market_id = ? AND is_paper = 0",
                         (pos.market_id, orphan_id),
@@ -529,6 +548,19 @@ class PositionReconciler:
                     await self._db.execute(
                         "UPDATE fills SET market_id = ? WHERE market_id = ? AND is_paper = 0",
                         (pos.market_id, orphan_id),
+                    )
+                    await self._db.execute(
+                        "UPDATE exit_lifecycle SET market_id = ? WHERE market_id = ? AND is_paper = 0",
+                        (pos.market_id, orphan_id),
+                    )
+                    # Identity recovery makes the old UNMARKABLE observation
+                    # obsolete immediately. If discovery is still dark, the
+                    # next exit pass recreates it from current evidence.
+                    await self._db.execute(
+                        """DELETE FROM exit_lifecycle
+                            WHERE market_id = ? AND is_paper = 0
+                              AND state = 'UNMARKABLE'""",
+                        (pos.market_id,),
                     )
                     # 2026-08-05: the LEDGER must migrate with the position
                     # tables. A settlement booked while the market was still a

@@ -177,13 +177,14 @@ async def test_get_order_status_parses_v2_fixed_point_fields():
 
 @pytest.mark.asyncio
 async def test_get_order_status_no_leg_uses_no_price():
-    """A NO-leg order is priced off no_price_dollars."""
+    """A tracked NO-leg order is priced by token identity, not v2 bid/ask side."""
     import json
     client = _client(is_live=True)
     client._init_api = MagicMock()
     client._portfolio_api = MagicMock()
+    client._live_pending["o3"] = MagicMock(token=TokenType.NO)
     client._call_raw = AsyncMock(return_value=json.dumps({"order": {
-        "status": "executed", "ticker": "KXNO", "side": "no",
+        "status": "executed", "ticker": "KXNO", "side": "bid",
         "fill_count_fp": "24.00", "remaining_count_fp": "0.00",
         "yes_price_dollars": "0.0300", "no_price_dollars": "0.9700",
     }}))

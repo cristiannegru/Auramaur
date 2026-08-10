@@ -478,3 +478,13 @@ def test_prospective_graduation_charges_cash_opportunity_cost():
         await db.close()
 
     asyncio.run(run())
+
+
+def test_graduation_timestamps_normalize_sqlite_naive_and_iso_aware_to_utc():
+    from auramaur.risk.graduation import _utc_timestamp
+
+    opened = _utc_timestamp("2026-08-10 07:00:00")
+    resolved = _utc_timestamp("2026-08-10T08:30:00+00:00")
+
+    assert opened.utcoffset().total_seconds() == 0
+    assert (resolved - opened).total_seconds() == 5400

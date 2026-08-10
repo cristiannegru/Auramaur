@@ -128,3 +128,58 @@ async def test_relevance_blends_freshness_with_engagement(monkeypatch):
     assert by_title["Fresh"] >= 0.24  # fresh-but-quiet floors near 0.25
     # And the query itself is freshness-bounded at the API.
     assert "since" in params
+
+
+class _Response:
+    def __init__(self, status, *, text="", data=None):
+        self.status = status
+        self._text = text
+        self._data = data or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def text(self):
+        return self._text
+
+    async def json(self):
+        return self._data
+
+
+class _Session:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.get_calls = []
+
+    def get(self, url, **kwargs):
+        self.get_calls.append((url, kwargs))
+        return next(self.responses)
+
+
+@pytest.mark.asyncio
+async def test_expired_token_400_recreates_session_before_relaxing_query(monkeypatch):
+    src = BlueskySource("me.bsky.social", "app-password")
+    src._jwt = "expired"
+    session = _Session([
+        _Response(400, text='{"error":"ExpiredToken","message":"Token has expired"}'),
+        _Response(200, data={"posts": []}),
+    ])
+    creates = 0
+
+    async def create(_session):
+        nonlocal creates
+        creates += 1
+        src._jwt = "fresh"
+
+    monkeypatch.setattr(src, "_create_session", create)
+    params = {"q": "election", "since": "2026-08-01T00:00:00Z"}
+    result = await src._search(session, params)
+
+    assert result == {"posts": []}
+    assert creates == 1
+    assert len(session.get_calls) == 2
+    assert "since" in session.get_calls[1][1]["params"]
+    assert session.get_calls[1][1]["headers"]["Authorization"] == "Bearer fresh"

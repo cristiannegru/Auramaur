@@ -151,14 +151,13 @@ class ToolUseAnalyzer:
         # operators who later switch to an API key.
 
         try:
+            from auramaur.nlp.claude_cli import run_claude_cli
             from auramaur.subprocess_security import analysis_subprocess_env
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            result = await run_claude_cli(
+                *cmd[1:],
+                timeout=300,
                 env=analysis_subprocess_env(),
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
         except asyncio.TimeoutError:
             log.warning("tool_use.timeout", market_id=market.id)
             return None
@@ -166,23 +165,14 @@ class ToolUseAnalyzer:
             log.warning("tool_use.subprocess_error", market_id=market.id, error=str(e))
             return None
 
-        if proc.returncode != 0:
-            log.warning(
-                "tool_use.nonzero_exit",
-                market_id=market.id,
-                returncode=proc.returncode,
-                stderr=stderr.decode()[:300],
-            )
-            return None
-
-        raw_stdout = stdout.decode()
+        raw_stdout = result.stdout
         parsed = self._parse_output(raw_stdout)
         if parsed is None:
             log.warning(
                 "tool_use.parse_failed",
                 market_id=market.id,
                 stdout_head=raw_stdout[:400],
-                stderr_head=stderr.decode()[:200],
+                stderr_head=result.stderr[:200],
             )
             return None
 

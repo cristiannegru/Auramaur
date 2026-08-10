@@ -52,6 +52,11 @@ class Market(BaseModel):
     closed: bool = False
     outcome_yes_price: float = 0.5
     outcome_no_price: float = 0.5
+    # Executable liquidation prices for an existing long outcome position.
+    # Discovery/fair-value logic intentionally uses the midpoint fields above;
+    # position valuation and exits must use the bid that can actually be sold.
+    outcome_yes_bid: float = 0.0
+    outcome_no_bid: float = 0.0
     volume: float = 0
     liquidity: float = 0
     spread: float = 0

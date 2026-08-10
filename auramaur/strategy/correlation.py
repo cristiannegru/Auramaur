@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -78,16 +77,15 @@ If no relationships found, return []. Only return the JSON array, no other text.
 
         try:
             from auramaur.subprocess_security import analysis_subprocess_env
-            proc = await asyncio.create_subprocess_exec(
-                "claude", "-p", prompt,
+            from auramaur.nlp.claude_cli import run_claude_cli
+            result = await run_claude_cli(
+                "-p", prompt,
                 "--output-format", "text",
                 "--model", self._model,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                timeout=120,
                 env=analysis_subprocess_env(),
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-            raw = stdout.decode().strip()
+            raw = result.stdout
 
             # Parse response
             # Try to extract JSON array

@@ -250,6 +250,44 @@ async def test_claimed_market_skipped(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_recent_filled_exit_blocks_reentry(tmp_path):
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    try:
+        await db.execute(
+            """INSERT INTO trades
+               (market_id, side, size, price, is_paper, order_id, status,
+                exchange, strategy_source, timestamp)
+               VALUES ('b', 'SELL', 10, 0.2, 0, 'exit-1', 'filled',
+                       'polymarket', 'exit', datetime('now', '-1 hour'))"""
+        )
+        assert await pillar._market_claimed("b") is True
+
+        await db.execute(
+            """UPDATE trades SET timestamp = datetime('now', '-25 hours')
+                WHERE order_id = 'exit-1'"""
+        )
+        assert await pillar._market_claimed("b") is False
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_working_order_blocks_entry_before_holdings_sync(tmp_path):
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    try:
+        await db.execute(
+            """INSERT INTO trades
+               (market_id, side, size, price, is_paper, order_id, status,
+                exchange, strategy_source)
+               VALUES ('b', 'SELL', 10, 0.2, 0, 'working-1', 'submitted',
+                       'polymarket', 'exit')"""
+        )
+        assert await pillar._market_claimed("b") is True
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_families_below_min_strikes_ignored(tmp_path):
     pillar, db, _ = await _pillar(
         tmp_path, [_strike("a", 5, 0.10), _strike("b", 15, 0.30)], "")

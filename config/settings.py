@@ -896,6 +896,9 @@ class TermStructureConfig(BaseModel):
     families_per_cycle: int = 5   # fresh LLM reads per cycle (cached fams free)
     curve_ttl_hours: float = 24.0
     max_entries_per_family: int = 2
+    # A stopped/targeted market must cool off before a recurring cached curve
+    # can buy it again. Durable trades history makes this restart-safe.
+    reentry_cooldown_hours: float = 24.0
     stake_usd: float = 10.0
     min_liquidity: float = 1000.0
     min_days: float = 0.25

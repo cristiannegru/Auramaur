@@ -934,13 +934,3 @@ class TradingEngine(CycleOrchestrationMixin):
             force_paper=force_paper,
         )
         return (await self._gateway.submit(intent)).result
-
-    async def _record_trade_for_attribution(self, market: Market, signal, decision) -> None:
-        """Deprecated hook kept for compatibility.
-
-        The portfolio table represents current position state and is owned by
-        the PnL tracker plus exchange reconcilers.  Writing synthetic rows here
-        used the wrong primary key and mixed dollar notional with token size,
-        which corrupted attribution instead of improving it.
-        """
-        return None

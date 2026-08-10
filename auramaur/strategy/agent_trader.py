@@ -32,8 +32,8 @@ settlement-based, like bias_harvest/long_horizon.
 """
 
 from __future__ import annotations
+import asyncio  # noqa: F401 - public test seam for subprocess monkeypatching
 
-import asyncio
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -517,28 +517,19 @@ class AgentTraderPillar:
         # memory from its working directory, and run from the repo root the
         # arms were caught citing the operator's own market analyses ("your
         # prior CPI work") — contaminating the A/B and correlating the arms.
-        proc = await asyncio.create_subprocess_exec(
-            "claude", "-p", prompt,
+        from auramaur.nlp.claude_cli import run_claude_cli
+        result = await run_claude_cli(
+            "-p", prompt,
             "--output-format", "text",
             "--model", model,
             "--effort", effort,
             "--allowedTools", _ALLOWED_TOOLS,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            timeout=cfg.llm_timeout_seconds,
             cwd=tempfile.gettempdir(),
             env=analysis_subprocess_env(),
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=cfg.llm_timeout_seconds)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise RuntimeError(f"model call timed out ({model})")
         call_budget.record_call()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"model call failed ({model}): {stderr.decode()[:200]}")
-        return stdout.decode()
+        return result.stdout
 
     # ------------------------------------------------------------------
     # Gemini arms — paid REST API, own daily ceiling, metered cost

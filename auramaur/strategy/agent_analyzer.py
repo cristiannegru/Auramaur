@@ -457,6 +457,11 @@ class AgentAnalyzer:
             "--allowedTools", _ALLOWED_TOOLS,
         ]
 
+        from auramaur.nlp.claude_cli import (
+            ClaudeCLIUnavailable,
+            run_claude_cli,
+        )
+
         max_attempts = 2
         backoff = [5, 15]
         last_error: Exception | None = None
@@ -469,32 +474,20 @@ class AgentAnalyzer:
                     model=self._model,
                     max_turns=self._max_turns,
                 )
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                result = await run_claude_cli(
+                    *cmd[1:],
+                    timeout=self._timeout_seconds,
                     cwd=tempfile.gettempdir(),
                     env=analysis_subprocess_env(),
                 )
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self._timeout_seconds,
-                )
+                return result.stdout
 
-                if proc.returncode != 0:
-                    err = stderr.decode().strip()
-                    raise RuntimeError(
-                        f"Agent call failed (rc={proc.returncode}): {err}"
-                    )
-
-                return stdout.decode().strip()
-
+            except ClaudeCLIUnavailable:
+                raise
             except asyncio.TimeoutError:
                 last_error = TimeoutError(
-                    f"Agent timed out after {self._timeout_seconds}s"
-                )
+                    f"Agent timed out after {self._timeout_seconds}s")
                 log.warning("agent.timeout", attempt=attempt + 1)
-                if proc.returncode is None:
-                    proc.kill()
             except RuntimeError as e:
                 last_error = e
                 log.warning("agent.call_error", attempt=attempt + 1, error=str(e))

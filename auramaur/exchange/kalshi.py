@@ -78,6 +78,7 @@ class KalshiClient:
         # orders were never monitored and their trade rows stayed 'pending'.
         self._live_pending: dict[str, Order] = {}
         self._discovery_cache: dict[tuple[bool, int], tuple[float, list[Market]]] = {}
+        self.last_position_sync_ok = False
 
     def _init_api(self):
         """Lazily initialize the kalshi-python client."""
@@ -755,7 +756,8 @@ class KalshiClient:
 
             # Price in terms of the outcome leg we hold (v2 prices are dollars;
             # legacy yes_price is cents → /100).
-            outcome = str(od.get("outcome_side") or od.get("side") or "yes").lower()
+            tracked_order = self._live_pending.get(order_id)
+            outcome = (tracked_order.token.value.lower() if tracked_order is not None else str(od.get("outcome_side") or od.get("side") or "yes").lower())
             if outcome == "no":
                 price = _num("no_price_dollars")
             else:
@@ -927,6 +929,7 @@ class KalshiClient:
         """
         import json as _json
 
+        self.last_position_sync_ok = False
         self._init_api()
         try:
             positions = []
@@ -961,18 +964,48 @@ class KalshiClient:
                     continue
 
                 ticker = p.get("ticker", "")
-                exposure = abs(float(p.get("market_exposure_dollars", 0)))
                 contracts = abs(pos_fp)
                 token = "NO" if pos_fp < 0 else "YES"
-                avg_price = exposure / contracts if contracts > 0 else 0
+                # Kalshi separates open-position trade cost from the fee still
+                # attributable to that inventory. The old mirror discarded
+                # position_fee_cost_dollars and understated every live basis.
+                base_cost = abs(float(
+                    p.get("position_cost_dollars")
+                    or p.get("market_exposure_dollars")
+                    or 0
+                ))
+                if "position_fee_cost_dollars" in p:
+                    position_fee = abs(float(p.get("position_fee_cost_dollars") or 0))
+                elif "fees_paid_dollars" in p:
+                    cumulative_fees = abs(float(p.get("fees_paid_dollars") or 0))
+                    total_traded = abs(float(p.get("total_traded_dollars") or 0))
+                    base_avg = base_cost / contracts if contracts > 0 else 0.0
+                    coefficient = float(
+                        self._settings.arbitrage.exchange_fees.get("kalshi", 0.07)
+                    )
+                    open_fee_cap = coefficient * contracts * base_avg * (1.0 - base_avg)
+                    # With no reductions, every paid fee belongs to open inventory.
+                    # After partial exits cumulative_fees includes historical close
+                    # fees, so cap it at the fee implied by current open exposure.
+                    position_fee = (
+                        cumulative_fees
+                        if abs(total_traded - base_cost) <= 0.0001
+                        else min(cumulative_fees, open_fee_cap)
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Kalshi position {ticker} lacks authoritative fee fields"
+                    )
+                total_cost = base_cost + position_fee
+                avg_price = total_cost / contracts if contracts > 0 else 0
 
                 # Get current market price for this position
                 try:
                     market = await self.get_market(ticker)
                     if market and token == "NO":
-                        current_price = market.outcome_no_price
+                        current_price = market.outcome_no_bid
                     elif market:
-                        current_price = market.outcome_yes_price
+                        current_price = market.outcome_yes_bid
                     else:
                         current_price = avg_price
                 except Exception:
@@ -1001,6 +1034,9 @@ class KalshiClient:
                     "volume": market.volume if market else 0.0,
                     "liquidity": market.liquidity if market else 0.0,
                     "contracts": contracts,
+                    "base_cost": base_cost,
+                    "position_fee": position_fee,
+                    "total_cost": total_cost,
                     "avg_price": avg_price,
                     "current_price": current_price,
                     "token": token,
@@ -1060,7 +1096,7 @@ class KalshiClient:
                            updated_at = excluded.updated_at""",
                     (r["ticker"], r["contracts"], round(r["avg_price"], 4),
                      round(r["current_price"], 4),
-                     round((r["current_price"] - r["avg_price"]) * r["contracts"], 4),
+                     round(r["contracts"] * r["current_price"] - r["total_cost"], 4),
                      r["category"], r["token"], r["ticker"]),
                 )
                 await db.execute(
@@ -1080,8 +1116,35 @@ class KalshiClient:
                         r["token"],
                         r["ticker"],
                         r["contracts"],
-                        round(r["avg_price"], 4),
-                        round(r["contracts"] * r["avg_price"], 4),
+                        round(r["avg_price"], 6),
+                        round(r["total_cost"], 4),
+                    ),
+                )
+                await db.execute(
+                    """INSERT INTO venue_positions
+                       (venue,asset_id,condition_id,market_id,title,outcome,size,
+                        avg_price,current_price,initial_value,current_value,
+                        cash_pnl,redeemable,fetched_at)
+                       VALUES ('kalshi',?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                       ON CONFLICT(venue,asset_id) DO UPDATE SET
+                           condition_id=excluded.condition_id,
+                           market_id=excluded.market_id,title=excluded.title,
+                           outcome=excluded.outcome,size=excluded.size,
+                           avg_price=excluded.avg_price,
+                           current_price=excluded.current_price,
+                           initial_value=excluded.initial_value,
+                           current_value=excluded.current_value,
+                           cash_pnl=excluded.cash_pnl,
+                           redeemable=excluded.redeemable,
+                           fetched_at=excluded.fetched_at""",
+                    (
+                        f"{r['ticker']}:{r['token']}", r["ticker"], r["ticker"],
+                        r["question"], r["token"], r["contracts"],
+                        round(r["avg_price"], 6), round(r["current_price"], 6),
+                        round(r["total_cost"], 4),
+                        round(r["contracts"] * r["current_price"], 4),
+                        round(r["contracts"] * r["current_price"] - r["total_cost"], 4),
+                        0,
                     ),
                 )
                 synced_ids.append(r["ticker"])
@@ -1100,6 +1163,12 @@ class KalshiClient:
                           AND market_id NOT IN ({placeholders})""",
                     tuple(synced_ids),
                 )
+                await db.execute(
+                    f"""DELETE FROM venue_positions
+                        WHERE venue='kalshi'
+                          AND market_id NOT IN ({placeholders})""",
+                    tuple(synced_ids),
+                )
             else:
                 await db.execute(
                     "DELETE FROM portfolio WHERE exchange = 'kalshi' AND is_paper = 0"
@@ -1109,6 +1178,7 @@ class KalshiClient:
                        WHERE is_paper = 0
                          AND market_id IN (SELECT id FROM markets WHERE exchange = 'kalshi')"""
                 )
+                await db.execute("DELETE FROM venue_positions WHERE venue='kalshi'")
 
             # NOTE (history): a paper-Kalshi purge lived here 2026-06→07 (#131)
             # under the assumption that "the paper trader never writes Kalshi
@@ -1121,14 +1191,33 @@ class KalshiClient:
             # impossible. The purge is REMOVED; the legacy 2026-06-07 orphan
             # snapshot it targeted was already gone after a month of purges.
 
+            mirror = await db.fetchone(
+                """SELECT COUNT(*) AS n, COALESCE(SUM(initial_value),0) AS cost,
+                          COALESCE(SUM(current_value),0) AS value
+                     FROM venue_positions WHERE venue='kalshi'"""
+            )
+            expected_cost = sum(r["total_cost"] for r in rows)
+            expected_value = sum(r["contracts"] * r["current_price"] for r in rows)
+            if (
+                int(mirror["n"] or 0) != len(rows)
+                or abs(float(mirror["cost"] or 0) - expected_cost) > 0.02
+                or abs(float(mirror["value"] or 0) - expected_value) > 0.02
+            ):
+                raise RuntimeError("Kalshi venue/local position cross-check failed")
+
             await db.commit()
+            self.last_position_sync_ok = True
             if synced > 0:
-                log.info("kalshi.positions_synced", count=synced)
+                log.info(
+                    "kalshi.positions_synced", count=synced,
+                    cost=round(expected_cost, 2), value=round(expected_value, 2),
+                )
             return synced
 
         except Exception as e:
+            self.last_position_sync_ok = False
             log.error("kalshi.sync_positions_error", error=str(e))
-            return 0
+            raise
 
     async def close(self) -> None:
         """Clean up resources."""
@@ -1201,6 +1290,9 @@ class KalshiClient:
             else:
                 yes_price = last_price
             no_price = 1.0 - yes_price
+            # Kalshi publishes bids for both outcomes. A held YES liquidates at
+            # yes_bid; a held NO liquidates at the complement of yes_ask.
+            no_bid = (1.0 - yes_ask) if yes_ask > 0 else 0.0
 
             end_date = None
             close_time = _get("close_time") or _get("expiration_time")
@@ -1236,6 +1328,8 @@ class KalshiClient:
                 active=status in ("open", "active", ""),
                 outcome_yes_price=yes_price,
                 outcome_no_price=no_price,
+                outcome_yes_bid=yes_bid,
+                outcome_no_bid=no_bid,
                 volume=volume,
                 liquidity=liquidity,
                 spread=spread,

@@ -498,7 +498,8 @@ class PortfolioTracker:
                 # IBKR syncer maintains current_price from live option quotes, so
                 # leave it untouched for that venue (we still need `market` below
                 # for end_date / profit-target logic).
-                if exchange != "ibkr":
+                live_book_configured = bool(getattr(settings, "auramaur_live", False) and getattr(settings.execution, "live", False))
+                if exchange != "ibkr" and not (exchange == "kalshi" and live_book_configured):
                     new_mark = self._resolve_mark_price(pos, market)
                     if new_mark is None:
                         # Side unresolved — keep the stored mark (the live

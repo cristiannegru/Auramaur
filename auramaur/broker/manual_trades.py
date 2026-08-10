@@ -91,7 +91,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.broker.ledger import record_ledger_event
+from auramaur.broker.ledger import VENUE_STRATEGY, record_ledger_event
 from auramaur.broker.reconciler import token_for_outcome
 from auramaur.db.database import Database
 
@@ -342,6 +342,13 @@ async def _book_manual_sell(
         market_id=market_id, kind="sell", token=token,
         qty=qty, pnl=pnl, fees=0.0, is_paper=False,
         source_ref=source_ref, realized_at=realized_at,
+    )
+    # A venue-observed sell with no entry ancestry is still classified:
+    # it is venue-unattributed, never an empty attribution leak.
+    await db.execute(
+        """UPDATE pnl_ledger SET strategy_source = ?
+            WHERE source_ref = ? AND TRIM(strategy_source) = ''""",
+        (VENUE_STRATEGY, source_ref),
     )
     landed = await db.fetchone(
         "SELECT 1 FROM pnl_ledger WHERE source_ref = ?", (source_ref,))

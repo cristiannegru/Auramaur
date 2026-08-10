@@ -699,3 +699,67 @@ async def test_peaks_are_per_position_and_orphans_are_pruned(tmp_path):
         assert set(remaining) == {"M1:YES:1"}, remaining
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_live_kalshi_preserves_syncer_executable_mark(settings):
+    """Live Kalshi exits must use the venue syncer's held-leg bid, not midpoint."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings.auramaur_live = True
+        settings.execution.live = True
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('KXWIDE', 'kalshi', 'BUY', 100, 0.40, 0.45,
+                       'test', 'NO', 'KXWIDE', 0)"""
+        )
+        await db.commit()
+
+        discovery = AsyncMock()
+        discovery.get_market = AsyncMock(return_value=_make_market(
+            "KXWIDE", 0.20, no_price=0.80,
+        ))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        await tracker.check_exits(settings, discovery, exchange="kalshi")
+
+        row = await db.fetchone(
+            "SELECT current_price FROM portfolio WHERE market_id='KXWIDE'")
+        assert row["current_price"] == pytest.approx(0.45)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_paper_kalshi_refreshes_discovery_mark(settings):
+    """Paper Kalshi has no venue syncer, so discovery must still refresh marks."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings.auramaur_live = False
+        settings.execution.live = False
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('KXPAPER', 'kalshi', 'BUY', 10, 0.40, 0.45,
+                       'test', 'NO', 'KXPAPER', 1)"""
+        )
+        await db.commit()
+
+        discovery = AsyncMock()
+        discovery.get_market = AsyncMock(return_value=_make_market(
+            "KXPAPER", 0.20, no_price=0.80,
+        ))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        await tracker.check_exits(settings, discovery, exchange="kalshi")
+
+        row = await db.fetchone(
+            "SELECT current_price FROM portfolio WHERE market_id='KXPAPER'")
+        assert row["current_price"] == pytest.approx(0.80)
+    finally:
+        await db.close()

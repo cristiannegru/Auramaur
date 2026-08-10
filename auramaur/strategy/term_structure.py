@@ -574,38 +574,35 @@ class TermStructurePillar:
                     f"non-reserved Claude budget ({limit}/{budget}, paced) exhausted")
         # Neutral cwd: `claude -p` loads CLAUDE.md + project memory from its
         # working directory (see agent_trader / the context-leak note).
-        proc = await asyncio.create_subprocess_exec(
-            "claude", "-p", prompt,
-            "--output-format", "text",
-            "--model", cfg.model,
-            "--effort", cfg.effort,
-            "--allowedTools", "WebSearch,WebFetch",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=tempfile.gettempdir(),
-            env=analysis_subprocess_env(),
+        from auramaur.nlp.claude_cli import (
+            ClaudeCLIUnavailable,
+            run_claude_cli,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=cfg.llm_timeout_seconds)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise RuntimeError("curve read timed out")
-        call_budget.record_call()
-        if proc.returncode != 0:
-            detail = (stderr.decode().strip() or stdout.decode().strip())[:300]
-            if "weekly limit" in detail.lower() or "usage limit" in detail.lower():
-                self._claude_blocked_until = now + timedelta(hours=12)
+            result = await run_claude_cli(
+                "-p", prompt,
+                "--output-format", "text",
+                "--model", cfg.model,
+                "--effort", cfg.effort,
+                "--allowedTools", "WebSearch,WebFetch",
+                timeout=cfg.llm_timeout_seconds,
+                cwd=tempfile.gettempdir(),
+                env=analysis_subprocess_env(),
+            )
+        except ClaudeCLIUnavailable as exc:
             if self._fallbacks_enabled(cfg):
-                log.warning(
-                    "term_structure.claude_fallback", error=detail,
-                    blocked_until=(self._claude_blocked_until.isoformat()
-                                   if self._claude_blocked_until else ""),
-                )
+                return await self._fallback(prompt, cfg, "claude_quota_circuit")
+            raise RuntimeError(f"curve read failed: {exc}") from exc
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("curve read timed out") from exc
+        except RuntimeError as exc:
+            if self._fallbacks_enabled(cfg):
+                log.warning("term_structure.claude_fallback", error=str(exc)[:300])
                 return await self._fallback(prompt, cfg, "claude_call_failed")
-            raise RuntimeError(f"curve read failed: {detail}")
+            raise
+        call_budget.record_call()
         self._last_reader = ("claude", str(cfg.model))
-        return stdout.decode()
+        return result.stdout
 
     @staticmethod
     def _fallbacks_enabled(cfg) -> bool:
@@ -933,6 +930,32 @@ class TermStructurePillar:
         row = await self._db.fetchone(
             "SELECT 1 FROM portfolio WHERE market_id = ? AND size > 0 LIMIT 1",
             (market_id,))
+        if row is not None:
+            return True
+
+        # Do not race an order/lifecycle transition that has not reached the
+        # holdings mirrors yet.
+        row = await self._db.fetchone(
+            """SELECT 1 FROM trades
+                WHERE market_id = ?
+                  AND status IN ('pending', 'submitted', 'open', 'working')
+                LIMIT 1""",
+            (market_id,),
+        )
+        if row is not None:
+            return True
+
+        cooldown = max(
+            0.0, float(self._settings.term_structure.reentry_cooldown_hours))
+        if cooldown <= 0:
+            return False
+        row = await self._db.fetchone(
+            """SELECT 1 FROM trades
+                WHERE market_id = ? AND side = 'SELL' AND status = 'filled'
+                  AND datetime(timestamp) >= datetime('now', ?)
+                LIMIT 1""",
+            (market_id, f"-{cooldown} hours"),
+        )
         return row is not None
 
     async def _try_enter(self, market: Market, prob_yes: float, thesis: str,

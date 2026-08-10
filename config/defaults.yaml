@@ -1023,6 +1023,8 @@ term_structure:
   families_per_cycle: 5
   curve_ttl_hours: 24.0
   max_entries_per_family: 2
+  # Prevent a recurring curve from buying straight back after an exit.
+  reentry_cooldown_hours: 24.0
   stake_usd: 10.0
   # Thin siblings may inform the curve, but cannot be traded. This avoids
   # discarding an otherwise valid ladder because a deep strike is illiquid.

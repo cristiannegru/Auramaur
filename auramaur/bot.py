@@ -1496,8 +1496,10 @@ class AuramaurBot(
                     reconciled = await reconciler.reconcile()
                     positions = reconciler.to_live_positions(reconciled)
 
-                    # Update cost_basis from real fill prices (ground truth),
-                    # then delete stale rows — one short, serialized
+                    # Mirror venue size/token identity while preserving an active
+                    # bot fill-ledger basis. Polymarket's avgPrice is cumulative
+                    # venue history and can include a prior closed episode; using
+                    # it over a fresh fill basis caused a false immediate stop. — one short, serialized
                     # transaction (contention plan, Phase 2): the network work
                     # (reconcile()) is already done, so this block is db-only.
                     # A successful empty response is authoritative; a failed
@@ -1537,8 +1539,18 @@ class AuramaurBot(
                                            token = excluded.token,
                                            token_id = excluded.token_id,
                                            size = excluded.size,
-                                           avg_cost = excluded.avg_cost,
-                                           total_cost = excluded.total_cost,
+                                           avg_cost = CASE
+                                               WHEN cost_basis.size > 0
+                                                AND cost_basis.avg_cost > 0
+                                                AND cost_basis.token_id = excluded.token_id
+                                               THEN cost_basis.avg_cost
+                                               ELSE excluded.avg_cost END,
+                                           total_cost = excluded.size * CASE
+                                               WHEN cost_basis.size > 0
+                                                AND cost_basis.avg_cost > 0
+                                                AND cost_basis.token_id = excluded.token_id
+                                               THEN cost_basis.avg_cost
+                                               ELSE excluded.avg_cost END,
                                            updated_at = excluded.updated_at""",
                                     # Normalize the raw CLOB outcome ("Yes"/"No") to the
                                     # canonical TokenType value ("YES"/"NO"). Writing the raw

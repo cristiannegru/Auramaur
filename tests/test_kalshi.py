@@ -15,6 +15,8 @@ class TestKalshiPositionSyncerBalance:
     def _settings(self, is_live: bool):
         s = MagicMock()
         s.is_live = is_live
+        s.auramaur_live = is_live
+        s.execution.live = is_live
         return s
 
     @pytest.mark.asyncio
@@ -60,6 +62,8 @@ class TestKalshiPositionSyncerPaperSync:
     def _settings(self, is_live: bool):
         s = MagicMock()
         s.is_live = is_live
+        s.auramaur_live = is_live
+        s.execution.live = is_live
         return s
 
     def _db(self, kalshi_ids=("KXTEST",)):
@@ -161,6 +165,7 @@ class TestKalshiLivePositionAccounting:
                     "ticker": "KXTEST",
                     "position_fp": 10,
                     "market_exposure_dollars": 4.2,
+                    "position_fee_cost_dollars": 0.3,
                 }]
             }))
             client.get_market = AsyncMock(return_value=Market(
@@ -192,12 +197,12 @@ class TestKalshiLivePositionAccounting:
             assert market_row["condition_id"] == "KXTEST"
             assert portfolio["exchange"] == "kalshi"
             assert portfolio["size"] == pytest.approx(10)
-            assert portfolio["avg_price"] == pytest.approx(0.42)
+            assert portfolio["avg_price"] == pytest.approx(0.45)
             assert portfolio["token"] == "YES"
             assert portfolio["is_paper"] == 0
             assert cost_basis["size"] == pytest.approx(10)
-            assert cost_basis["avg_cost"] == pytest.approx(0.42)
-            assert cost_basis["total_cost"] == pytest.approx(4.2)
+            assert cost_basis["avg_cost"] == pytest.approx(0.45)
+            assert cost_basis["total_cost"] == pytest.approx(4.5)
             assert cost_basis["is_paper"] == 0
         finally:
             await db.close()
@@ -217,7 +222,8 @@ class TestKalshiLivePositionAccounting:
             client._call_raw = AsyncMock(return_value=json.dumps({
                 "market_positions": [
                     {"ticker": f"KXORD{i}", "position_fp": 5,
-                     "market_exposure_dollars": 2.0}
+                     "market_exposure_dollars": 2.0,
+                     "position_fee_cost_dollars": 0.0}
                     for i in range(3)
                 ]
             }))
@@ -296,6 +302,7 @@ class TestKalshiLivePositionAccounting:
                 "market_positions": [{
                     "ticker": "KXLIVE", "position_fp": 10,
                     "market_exposure_dollars": 4.2,
+                    "position_fee_cost_dollars": 0.3,
                 }]
             }))
             client.get_market = AsyncMock(return_value=Market(
@@ -342,6 +349,8 @@ class TestKalshiMarketParsing:
         assert market.question == "Will event happen?"
         # Midpoint of bid 0.65 and ask 0.68
         assert market.outcome_yes_price == pytest.approx(0.665, abs=0.01)
+        assert market.outcome_yes_bid == pytest.approx(0.65)
+        assert market.outcome_no_bid == pytest.approx(0.32)
         assert market.active is True
 
     def test_parse_market_closed(self):
@@ -627,3 +636,93 @@ class TestKalshiPrepareOrderDirectSell:
         assert order.side == OrderSide.BUY
         assert order.token == TokenType.NO
         assert order.exchange == "kalshi"
+
+
+@pytest.mark.asyncio
+async def test_syncer_keeps_live_kalshi_book_visible_while_killed():
+    settings = MagicMock()
+    settings.is_live = False  # kill switch folds configured LIVE to false
+    settings.auramaur_live = True
+    settings.execution.live = True
+    exchange = MagicMock()
+    exchange.sync_positions = AsyncMock(return_value=0)
+    db = MagicMock()
+    db.fetchall = AsyncMock(return_value=[])
+
+    syncer = KalshiPositionSyncer(
+        settings=settings, db=db, exchange=exchange, paper=MagicMock()
+    )
+    assert await syncer.sync() == []
+    exchange.sync_positions.assert_awaited_once_with(db)
+
+
+@pytest.mark.asyncio
+async def test_sync_positions_fails_closed_without_authoritative_fee_cost():
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        client = KalshiClient.__new__(KalshiClient)
+        client._init_api = MagicMock()
+        client._portfolio_api = MagicMock()
+        client._portfolio_api.get_positions_without_preload_content = MagicMock()
+        client._call_raw = AsyncMock(return_value=json.dumps({
+            "market_positions": [{
+                "ticker": "KXNOFEE",
+                "position_fp": 2,
+                "market_exposure_dollars": 1.0,
+            }]
+        }))
+        client.get_market = AsyncMock()
+        with pytest.raises(RuntimeError, match="lacks authoritative fee fields"):
+            await client.sync_positions(db)
+        assert client.last_position_sync_ok is False
+    finally:
+        await db.close()
+
+
+
+
+@pytest.mark.asyncio
+async def test_rest_position_fee_fallback_handles_open_and_partially_reduced_inventory():
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        client = KalshiClient.__new__(KalshiClient)
+        client._init_api = MagicMock()
+        client._portfolio_api = MagicMock()
+        client._portfolio_api.get_positions_without_preload_content = MagicMock()
+        client._settings = MagicMock()
+        client._settings.arbitrage.exchange_fees = {"kalshi": 0.07}
+        client._call_raw = AsyncMock(return_value=json.dumps({
+            "market_positions": [
+                {
+                    "ticker": "OPEN", "position_fp": 100,
+                    "market_exposure_dollars": "6.0",
+                    "total_traded_dollars": "6.0",
+                    "fees_paid_dollars": "0.3948",
+                },
+                {
+                    "ticker": "PARTIAL", "position_fp": -10,
+                    "market_exposure_dollars": "8.1",
+                    "total_traded_dollars": "20.0",
+                    "fees_paid_dollars": "2.0",
+                },
+            ]
+        }))
+        client.get_market = AsyncMock(side_effect=[
+            Market(id="OPEN", exchange="kalshi", question="Open?",
+                   outcome_yes_bid=.06, outcome_no_bid=.93),
+            Market(id="PARTIAL", exchange="kalshi", question="Partial?",
+                   outcome_yes_bid=.18, outcome_no_bid=.80),
+        ])
+
+        assert await client.sync_positions(db) == 2
+        open_row = await db.fetchone(
+            "SELECT total_cost FROM cost_basis WHERE market_id='OPEN'")
+        partial_row = await db.fetchone(
+            "SELECT total_cost FROM cost_basis WHERE market_id='PARTIAL'")
+        assert open_row["total_cost"] == pytest.approx(6.3948)
+        # Partial inventory caps cumulative fees at .07 * 10 * .81 * .19.
+        assert partial_row["total_cost"] == pytest.approx(8.20773, abs=1e-4)
+    finally:
+        await db.close()

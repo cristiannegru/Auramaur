@@ -15,7 +15,9 @@ logger = structlog.get_logger(__name__)
 
 _EVERYTHING_URL = "https://newsapi.org/v2/everything"
 _REQUEST_INTERVAL = 1.5
-_BACKOFF_DELAYS = [2, 5, 15]
+# Keep source-local retry work inside Aggregator's 20s deadline. A 429 is
+# provider quota state, not a reason to hold every evidence gather open.
+_BACKOFF_DELAYS = [2]
 
 
 class NewsAPISource:

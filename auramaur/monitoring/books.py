@@ -125,11 +125,22 @@ async def gather_books(db) -> list[dict]:
     open_rows = await db.fetchall(
         """SELECT CASE WHEN p.exchange = 'kraken' THEN 'kraken_directional'
                   ELSE COALESCE(
+                 (SELECT t.strategy_source FROM trades t
+                  WHERE t.market_id = p.market_id
+                    AND t.exchange = p.exchange
+                    AND t.is_paper = p.is_paper
+                    AND t.status = 'filled'
+                    AND t.side = 'BUY'
+                    AND t.strategy_source IS NOT NULL
+                  ORDER BY t.timestamp DESC LIMIT 1),
                  (SELECT s.strategy_source FROM signals s
                   WHERE s.market_id = p.market_id
+                    AND COALESCE(s.exchange, 'polymarket') = p.exchange
                     AND s.strategy_source IS NOT NULL
                     AND s.strategy_source != 'order_monitor'
-                  ORDER BY s.timestamp ASC LIMIT 1), 'llm') END AS book,
+                  ORDER BY s.timestamp DESC LIMIT 1),
+                 CASE WHEN p.exchange = 'kalshi'
+                      THEN 'venue_unattributed_kalshi' ELSE 'llm' END) END AS book,
                   SUM(CASE WHEN p.is_paper = 0 THEN 1 ELSE 0 END) AS open_n,
                   SUM(CASE WHEN p.is_paper = 0 THEN p.size * p.avg_price ELSE 0 END) AS open_usd,
                   SUM(CASE WHEN p.is_paper = 1 THEN 1 ELSE 0 END) AS open_paper_n

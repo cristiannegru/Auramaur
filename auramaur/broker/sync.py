@@ -112,7 +112,8 @@ class PositionSyncer:
                           m.clob_token_yes, m.clob_token_no
                    FROM cost_basis cb
                    LEFT JOIN markets m ON cb.market_id = m.id
-                   WHERE cb.size > 0 AND cb.is_paper = 0"""
+                   WHERE cb.size > 0 AND cb.is_paper = 0
+                     AND COALESCE(m.exchange, 'polymarket') = 'polymarket'"""
             )
 
             for row in rows:
@@ -522,17 +523,33 @@ class KalshiPositionSyncer:
         self._exchange = exchange
         self._paper = paper
 
+    def _live_book_configured(self) -> bool:
+        """Which book owns venue truth, independent of the kill switch.
+
+        A kill switch halts execution; it must not swap reconciliation to the
+        paper book and hide live exposure from operators.
+        """
+        return bool(self._settings.auramaur_live and self._settings.execution.live)
+
     async def sync(self) -> list[LivePosition]:
-        if not self._settings.is_live and self._paper is not None:
+        live_book = self._live_book_configured()
+        if not live_book and self._paper is not None:
             return await self._sync_paper()
 
         try:
             await self._exchange.sync_positions(self._db)
         except Exception as e:
             log.error("sync.kalshi.error", error=str(e))
-            return []
+            if live_book:
+                from auramaur.killswitch import KILL_SWITCH_PATH
+                KILL_SWITCH_PATH.parent.mkdir(parents=True, exist_ok=True)
+                KILL_SWITCH_PATH.write_text(
+                    f"Kalshi reconciliation failed closed: {type(e).__name__}\n"
+                )
+                log.critical("sync.kalshi.kill_switch_activated")
+            raise
 
-        is_paper_flag = 0 if self._settings.is_live else 1
+        is_paper_flag = 0 if live_book else 1
         rows = await self._db.fetchall(
             """SELECT p.market_id, p.token, p.size, p.avg_price, p.current_price,
                       p.category
@@ -652,10 +669,10 @@ class KalshiPositionSyncer:
         return positions
 
     async def get_cash_balance(self) -> float:
-        if not self._settings.is_live and self._paper is not None:
+        if not self._live_book_configured() and self._paper is not None:
             return self._paper.balance
         try:
             return await self._exchange.get_balance()
         except Exception as e:
-            log.debug("sync.kalshi.balance_error", error=str(e))
-            return 0.0
+            log.error("sync.kalshi.balance_error", error=str(e))
+            raise
